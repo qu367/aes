@@ -81,73 +81,82 @@ class DocumentBertScoringModel:
         )
 
     def predict_for_regress(self, data):
-        correct_output = None
-        if isinstance(data, tuple) and len(data) == 2:
-            document_representations_word_document, _ = encode_documents(
-                data[0], self.bert_tokenizer, max_input_length=512
+        if not (isinstance(data, tuple) and len(data) == 2):
+            raise TypeError("predict_for_regress expects (documents, labels)")
+        documents, labels = data
+        if not documents:
+            raise ValueError("empty document list")
+
+        print("encoding documents...", flush=True)
+        document_tensors_word_document, _ = encode_documents(
+            documents, self.bert_tokenizer, max_input_length=512
+        )
+        document_tensors_chunk_list = []
+        for chunk_size in self.chunk_sizes:
+            document_tensors_chunk, _ = encode_documents(
+                documents,
+                self.bert_tokenizer,
+                max_input_length=chunk_size,
             )
-            document_representations_chunk_list = []
-            for i in range(len(self.chunk_sizes)):
-                document_representations_chunk, _ = encode_documents(
-                    data[0],
-                    self.bert_tokenizer,
-                    max_input_length=self.chunk_sizes[i],
-                )
-                document_representations_chunk_list.append(document_representations_chunk)
-            correct_output = torch.FloatTensor(data[1])
+            document_tensors_chunk_list.append(document_tensors_chunk)
+        correct_output = torch.FloatTensor(labels)
+        print(
+            "encoded: word",
+            tuple(document_tensors_word_document.shape),
+            "chunks",
+            len(document_tensors_chunk_list),
+            flush=True,
+        )
 
-        self.bert_regression_by_word_document.to(device=self.args["device"])
-        self.bert_regression_by_chunk.to(device=self.args["device"])
-
+        device = self.args["device"]
+        self.bert_regression_by_word_document.to(device=device)
+        self.bert_regression_by_chunk.to(device=device)
         self.bert_regression_by_word_document.eval()
         self.bert_regression_by_chunk.eval()
 
-        num_docs = document_representations_word_document.shape[0]
+        num_docs = int(document_tensors_word_document.shape[0])
+        batch_size = int(self.args["batch_size"])
         with torch.no_grad():
             predictions = torch.empty((num_docs))
-            for i in range(0, num_docs, self.args["batch_size"]):
-                batch_end = min(i + self.args["batch_size"], num_docs)
-                batch_document_tensors_word_document = document_nxt_word_document[
-                    i:batch_end
-                ].to(device=self.args["device"])
-                batch_predictions_word_document = self.bert_regression_by_word_document(
-                    batch_document_tensors_word_document, device=self.args["device"]
-                )
-                batch_predictions_word_document = torch.squeeze(batch_predictions_word_document)
-                if batch_predictions_word_document.dim() == 0:
-                    batch_predictions_word_document = batch_predictions_word_document.unsqueeze(0)
+            for i in range(0, num_docs, batch_size):
+                batch_end = min(i + batch_size, num_docs)
+                batch_word = document_tensors_word_document[i:batch_end].to(device=device)
+                batch_pred = self.bert_regression_by_word_document(batch_word, device=device)
+                batch_pred = torch.squeeze(batch_pred)
+                if batch_pred.dim() == 0:
+                    batch_pred = batch_pred.unsqueeze(0)
 
-                batch_predictions_word_chunk_sentence_doc = batch_predictions_word_document
                 for chunk_index in range(len(self.chunk_sizes)):
-                    batch_document_tensors_chunk = document_nxt_chunk_list[chunk_index][
-                        i:batch_end
-                    ].to(device=self.args["device"])
-                    batch_predictions_chunk = self.bert_regression_by_chunk(
-                        batch_document_tensors_chunk,
-                        device=self.args["device"],
+                    batch_chunk = document_tensors_chunk_list[chunk_index][i:batch_end].to(
+                        device=device
+                    )
+                    chunk_pred = self.bert_regression_by_chunk(
+                        batch_chunk,
+                        device=device,
                         bert_batch_size=self.bert_batch_sizes[chunk_index],
                     )
-                    batch_predictions_chunk = torch.squeeze(batch_predictions_chunk)
-                    if batch_predictions_chunk.dim() == 0:
-                        batch_predictions_chunk = batch_predictions_chunk.unsqueeze(0)
-                    batch_predictions_word_chunk_sentence_doc = torch.add(
-                        batch_predictions_word_chunk_sentence_doc, batch_predictions_chunk
-                    )
-                predictions[i:batch_end] = batch_predictions_word_chunk_sentence_doc
+                    chunk_pred = torch.squeeze(chunk_pred)
+                    if chunk_pred.dim() == 0:
+                        chunk_pred = chunk_pred.unsqueeze(0)
+                    batch_pred = torch.add(batch_pred, chunk_pred)
+                predictions[i:batch_end] = batch_pred
+
         assert correct_output.shape == predictions.shape
 
         prediction_scores = []
         label_scores = []
         predictions = predictions.cpu().numpy()
         correct_output = correct_output.cpu().numpy()
-        outfile = open(
-            os.path.join(self.args["model_directory"], self.args["result_file"]), "w"
-        )
-        for index, item in enumerate(predictions):
-            prediction_scores.append(fix_score(item, self.prompt))
-            label_scores.append(correct_output[index])
-            outfile.write("%f\t%f\n" % (label_scores[-1], prediction_scores[-1]))
-        outfile.close()
+
+        result_path = self.args["result_file"]
+        if not os.path.isabs(result_path):
+            result_path = os.path.join(self.args["model_directory"], result_path)
+        with open(result_path, "w", encoding="utf-8") as outfile:
+            for index, item in enumerate(predictions):
+                prediction_scores.append(fix_score(item, self.prompt))
+                label_scores.append(correct_output[index])
+                outfile.write("%f\t%f\n" % (label_scores[-1], prediction_scores[-1]))
+        print("wrote", result_path, flush=True)
 
         test_eva_res = evaluation(label_scores, prediction_scores)
         print("pearson:", float(test_eva_res[7]))
