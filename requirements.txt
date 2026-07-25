@@ -1,0 +1,8 @@
+torch>=1.9
+transformers==3.4.0
+sacremoses
+sentencepiece
+configargparse
+scikit-learn
+numpy
+scipy
