@@ -3,13 +3,13 @@
 
 Python 3.8 + transformers==3.4.0 권장 (QWK ≈ 0.797).
 
-테스트 데이터는 저장소에 없고, 실행 시
-https://github.com/ssuai/asap/tree/main/split 의 p8_test.tsv 를 받습니다.
+데이터: https://github.com/ssuai/asap/tree/main/split 의 p8_test.tsv
+모델: Zoho zip → models/p8_3/ (중첩 경로 자동 정리)
 
 Usage:
     python run.py
     python run.py --cpu
-    python run.py --allow-transformers4   # QWK ~0.53
+    python run.py --allow-transformers4
     python run.py --skip-install-deps
 """
 
@@ -19,6 +19,7 @@ import argparse
 import csv
 import io
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -30,7 +31,6 @@ MODEL_URL = (
     "https://files.zohopublic.com.cn/public/workdrive-public/download/"
     "dfpvf0458d50be9664034829928a666b68651?x-cli-msg=null"
 )
-# ssuai/asap 외부 test split (aes_demo_py38_asap.ipynb 와 동일)
 ASAP_TEST_URL = "https://github.com/ssuai/asap/raw/refs/heads/main/split/p8_test.tsv"
 MODEL_MARKER = ROOT / "models" / "p8_3" / "word_document" / "pytorch_model.bin"
 DATA_FILE = ROOT / "data" / "p8_test.csv"
@@ -89,7 +89,7 @@ def ensure_dependencies(allow_transformers4: bool) -> None:
 
 
 def fetch_asap_test_split(dest: Path = DATA_FILE) -> Path:
-    """Download ssuai/asap split/p8_test.tsv → id\\ttext\\tscore CSV."""
+    """Download ssuai/asap split/p8_test.tsv → id\\ttext\\tscore."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     log(f"Downloading ASAP test split: {ASAP_TEST_URL}")
     with urllib.request.urlopen(ASAP_TEST_URL) as resp:
@@ -129,29 +129,39 @@ def ensure_model() -> None:
         log(f"Model OK: {MODEL_MARKER}")
         return
 
-    zip_path = ROOT / "models" / "p8_3_model.zip"
+    model_dir = ROOT / "models"
+    target = model_dir / "p8_3"
+    zip_path = ROOT / "Multi-Scale-BERT-AES-Models.zip"
     download_file(MODEL_URL, zip_path)
-    log(f"Extracting model zip -> {ROOT / 'models'}")
+    log(f"Extracting model zip -> {model_dir}")
+    model_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(ROOT / "models")
+        zf.extractall(model_dir)
 
-    # zip 루트가 p8_3/ 이거나 바로 word_document/ 일 수 있음
+    # Zoho zip: models/Multi-Scale-BERT-AES-Models/p8_3/...
+    nested = model_dir / "Multi-Scale-BERT-AES-Models" / "p8_3"
+    if nested.exists() and not MODEL_MARKER.exists():
+        if target.exists():
+            shutil.rmtree(target)
+        nested.rename(target)
+        shutil.rmtree(model_dir / "Multi-Scale-BERT-AES-Models", ignore_errors=True)
+
+    # flat: models/word_document + models/chunk
     if not MODEL_MARKER.exists():
-        # 흔한 레이아웃: models/word_document → models/p8_3/word_document
-        wd = ROOT / "models" / "word_document"
-        ch = ROOT / "models" / "chunk"
+        wd = model_dir / "word_document"
+        ch = model_dir / "chunk"
         if wd.exists() and ch.exists():
-            target = ROOT / "models" / "p8_3"
             target.mkdir(parents=True, exist_ok=True)
             for name in ("word_document", "chunk", "config.json", "vocab.txt", "bert_config.json"):
-                src = ROOT / "models" / name
+                src = model_dir / name
                 if src.exists() and not (target / name).exists():
                     src.rename(target / name)
 
     if not MODEL_MARKER.exists():
+        listing = "\n".join(f"  {p}" for p in sorted(model_dir.rglob("*"))[:40])
         raise FileNotFoundError(
             f"Model not found after download: {MODEL_MARKER}\n"
-            "Place official p8_3 checkpoint under models/p8_3/"
+            f"Contents of {model_dir}:\n{listing}"
         )
     log(f"Model ready: {MODEL_MARKER}")
 
@@ -190,8 +200,17 @@ def check_environment(use_cuda: bool) -> None:
 
 
 def print_results(result_file: Path) -> None:
-    if not result_file.exists():
-        raise FileNotFoundError(f"Result file not found: {result_file}")
+    candidates = [
+        result_file,
+        ROOT / "models" / "p8_3" / "pred.txt",
+        ROOT / "models" / "p8_3" / result_file.name,
+    ]
+    for cand in candidates:
+        if cand.exists():
+            result_file = cand
+            break
+    else:
+        raise FileNotFoundError(f"Result file not found: tried {candidates}")
 
     actuals: list[float] = []
     preds: list[float] = []
