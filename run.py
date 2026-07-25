@@ -3,6 +3,9 @@
 
 Python 3.8 + transformers==3.4.0 권장 (QWK ≈ 0.797).
 
+테스트 데이터는 저장소에 없고, 실행 시
+https://github.com/ssuai/asap/tree/main/split 의 p8_test.tsv 를 받습니다.
+
 Usage:
     python run.py
     python run.py --cpu
